@@ -315,13 +315,15 @@
         <div class="session-setup" id="sessionSetup">
             <div class="instructions">
                 <strong>How to use:</strong><br>
-                • <strong>Leader:</strong> Click "Create Session" and share the code<br>
-                • <strong>Followers:</strong> Enter the session code and click "Join"<br>
-                • Works across all devices with internet connection!
+                • <strong>Leader:</strong> Click "Create Session" and share the Device ID below<br>
+                • <strong>Followers:</strong> Enter the full Device ID and click "Join"<br>
+                • Works across all devices with internet connection!<br>
+                <br>
+                <small><em>Note: Session codes (like ABC123) require a server. For now, share the full Device ID shown below.</em></small>
             </div>
             
             <div class="session-controls">
-                <input type="text" class="session-input" id="sessionIdInput" placeholder="Enter session code" maxlength="12">
+                <input type="text" class="session-input" id="sessionIdInput" placeholder="Enter Device ID (full peer ID)" maxlength="50">
                 <button class="btn btn-success" onclick="joinSession()" id="joinBtn">Join Session</button>
                 <button class="btn btn-primary" onclick="createSession()" id="createBtn">Create Session</button>
             </div>
@@ -331,9 +333,12 @@
 
         <div class="session-info hidden" id="sessionInfo">
             <h4>🔗 Session Active</h4>
+            <p><strong>Session Code:</strong></p>
             <div class="session-id" id="currentSessionId"></div>
-            <button class="btn btn-primary copy-btn" onclick="copySessionId()">📋 Copy</button>
-            <p style="margin: 10px 0;">Share this code with others to join your session</p>
+            <p><strong>Device ID to Share:</strong></p>
+            <div class="session-id" id="deviceIdToShare" style="font-size: 16px; color: #333;"></div>
+            <button class="btn btn-primary copy-btn" onclick="copyDeviceId()">📋 Copy Device ID</button>
+            <p style="margin: 15px 0; font-size: 14px;">Share the <strong>Device ID</strong> above with others to join your session</p>
             <button class="btn btn-danger" onclick="leaveSession()">Leave Session</button>
         </div>
 
@@ -374,6 +379,7 @@
                 this.connections = new Map();
                 this.sessionId = null;
                 this.isLeader = false;
+                this.leaderPeerId = null;
                 this.timecodeState = {
                     startTime: 0,
                     offset: 0,
@@ -454,11 +460,22 @@
                             });
                         }
                         break;
+                    case 'user-leaving':
+                        console.log('User leaving:', conn.peer);
+                        this.connections.delete(conn.peer);
+                        this.updateParticipantCount();
+                        break;
                 }
             }
 
             generateSessionId() {
-                return Math.random().toString(36).substr(2, 6).toUpperCase();
+                // Generate a shorter, easier to share session ID
+                const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+                let result = '';
+                for (let i = 0; i < 6; i++) {
+                    result += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return result;
             }
 
             async createSession() {
@@ -467,15 +484,21 @@
                     return;
                 }
 
-                this.sessionId = this.peer.id;
+                // Generate short session ID and store peer ID mapping
+                this.sessionId = this.generateSessionId();
+                this.leaderPeerId = this.peer.id;
                 this.isLeader = true;
+                
+                // Store the mapping in a simple way (you could use a server for this in production)
+                console.log(`Session ${this.sessionId} maps to peer ${this.peer.id}`);
+                
                 this.updateUI();
                 this.updateConnectionStatus('connected');
                 console.log('Created session with ID:', this.sessionId);
             }
 
             async joinSession() {
-                const inputSessionId = document.getElementById('sessionIdInput').value.trim();
+                const inputSessionId = document.getElementById('sessionIdInput').value.trim().toUpperCase();
                 if (!inputSessionId) {
                     alert('Please enter a session ID');
                     return;
@@ -488,14 +511,29 @@
 
                 this.updateConnectionStatus('connecting');
                 
+                // For now, we'll use a simple approach where the session ID IS the peer ID
+                // In production, you'd have a server to map short codes to peer IDs
                 try {
-                    const conn = this.peer.connect(inputSessionId);
+                    // Try to connect using the session ID directly as peer ID
+                    let targetPeerId = inputSessionId;
+                    
+                    // If it's a short code, we need to find the actual peer ID
+                    // For demo purposes, let's try common patterns
+                    if (inputSessionId.length === 6) {
+                        // This is our short code - in a real app, you'd query a server
+                        // For now, show error asking for the full peer ID
+                        alert('Short session codes require a server backend. Please ask the leader for their full Device ID (shown below the session controls) and try again.');
+                        this.updateConnectionStatus('disconnected');
+                        return;
+                    }
+                    
+                    const conn = this.peer.connect(targetPeerId);
                     
                     conn.on('open', () => {
                         console.log('Connected to session:', inputSessionId);
                         this.sessionId = inputSessionId;
                         this.isLeader = false;
-                        this.connections.set(inputSessionId, conn);
+                        this.connections.set(targetPeerId, conn);
                         
                         conn.send({ type: 'join-request' });
                         
@@ -510,7 +548,7 @@
 
                     conn.on('close', () => {
                         console.log('Connection to leader lost');
-                        this.leaveSession();
+                        this.handleConnectionLost();
                     });
 
                     conn.on('error', (error) => {
@@ -526,16 +564,52 @@
                 }
             }
 
-            leaveSession() {
-                // Close all connections
-                this.connections.forEach(conn => conn.close());
+            handleConnectionLost() {
+                console.log('Connection lost, cleaning up...');
                 this.connections.clear();
-                
                 this.sessionId = null;
                 this.isLeader = false;
                 this.resetTimer();
                 this.updateUI();
                 this.updateConnectionStatus('disconnected');
+                alert('Connection to session lost. You have been disconnected.');
+            }
+
+            leaveSession() {
+                console.log('Leaving session...');
+                
+                // Send leave message to all connections
+                this.connections.forEach(conn => {
+                    if (conn.open) {
+                        try {
+                            conn.send({ type: 'user-leaving' });
+                        } catch (error) {
+                            console.log('Error sending leave message:', error);
+                        }
+                    }
+                });
+                
+                // Close all connections with a small delay to ensure message is sent
+                setTimeout(() => {
+                    this.connections.forEach(conn => {
+                        try {
+                            conn.close();
+                        } catch (error) {
+                            console.log('Error closing connection:', error);
+                        }
+                    });
+                    this.connections.clear();
+                }, 100);
+                
+                // Clean up state
+                this.sessionId = null;
+                this.isLeader = false;
+                this.leaderPeerId = null;
+                this.resetTimer();
+                this.updateUI();
+                this.updateConnectionStatus('disconnected');
+                
+                console.log('Session left successfully');
             }
 
             broadcastToFollowers(message) {
@@ -697,11 +771,16 @@
                 const sessionInfo = document.getElementById('sessionInfo');
                 const leaderControls = document.getElementById('leaderControls');
                 const currentSessionId = document.getElementById('currentSessionId');
+                const deviceIdToShare = document.getElementById('deviceIdToShare');
 
                 if (this.sessionId) {
                     sessionSetup.classList.add('hidden');
                     sessionInfo.classList.remove('hidden');
                     currentSessionId.textContent = this.sessionId;
+                    
+                    if (this.isLeader && this.peer && this.peer.id) {
+                        deviceIdToShare.textContent = this.peer.id;
+                    }
                     
                     if (this.isLeader) {
                         leaderControls.classList.add('active');
